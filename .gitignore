@@ -1,7 +1,6 @@
 # Environment
 .env.*
-.env.local
-.env.*.local
+.env
 
 # Python
 __pycache__/
@@ -35,3 +34,5 @@ pgdata/
 # OS
 .DS_Store
 Thumbs.db
+
+frontend-next/.next/
