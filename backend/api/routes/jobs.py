@@ -7,6 +7,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from api.middleware.auth_middleware import get_current_user
 from db.models import Job, User
+from db.rls_context import user_rls
 from db.session import get_db, SessionLocal
 
 router = APIRouter()
@@ -34,31 +35,34 @@ async def stream_job_progress(
     SSE endpoint — pushes job progress every second until completed/failed.
     Replaces frontend polling entirely.
     """
+    user_id = current_user.id
+
     async def event_generator():
-        db = SessionLocal()
-        try:
-            while True:
-                job = db.query(Job).filter(
-                    Job.id == job_id,
-                    Job.user_id == current_user.id,
-                ).first()
+        with user_rls(user_id):
+            db = SessionLocal()
+            try:
+                while True:
+                    job = db.query(Job).filter(
+                        Job.id == job_id,
+                        Job.user_id == user_id,
+                    ).first()
 
-                if not job:
-                    yield {"data": json.dumps({"error": "Job not found"})}
-                    break
+                    if not job:
+                        yield {"data": json.dumps({"error": "Job not found"})}
+                        break
 
-                db.refresh(job)  # Ensure we get latest state
-                payload = _job_dict(job)
-                yield {"data": json.dumps(payload)}
+                    db.refresh(job)  # Ensure we get latest state
+                    payload = _job_dict(job)
+                    yield {"data": json.dumps(payload)}
 
-                if job.status in ("completed", "failed"):
-                    break
+                    if job.status in ("completed", "failed"):
+                        break
 
-                await asyncio.sleep(1)
-        except asyncio.CancelledError:
-            pass  # Client disconnected
-        finally:
-            db.close()
+                    await asyncio.sleep(1)
+            except asyncio.CancelledError:
+                pass  # Client disconnected
+            finally:
+                db.close()
 
     return EventSourceResponse(event_generator())
 

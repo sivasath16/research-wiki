@@ -1,12 +1,15 @@
 import secrets
 import httpx
 import redis as redis_lib
+from typing import Annotated
+
 from fastapi import APIRouter, Request, Response, Depends, HTTPException
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 from datetime import datetime
 
 from db.session import get_db
+from db.rls_context import oauth_rls_dependency
 from db.models import User
 from core.config import settings
 from core.security import encrypt_token
@@ -44,7 +47,13 @@ async def login():
 
 
 @router.get("/callback")
-async def callback(code: str, state: str, request: Request, db: Session = Depends(get_db)):
+async def callback(
+    code: str,
+    state: str,
+    request: Request,
+    _: Annotated[None, Depends(oauth_rls_dependency)],
+    db: Session = Depends(get_db),
+):
     """Exchange OAuth code for access token, upsert user, set session cookie."""
     # Validate OAuth state to prevent CSRF
     r = _get_redis()
@@ -78,6 +87,7 @@ async def callback(code: str, state: str, request: Request, db: Session = Depend
         gh_user = user_resp.json()
 
     github_id = gh_user["id"]
+    # oauth_rls_dependency + get_db: after_begin applies app.service_mode for this transaction.
     user = db.query(User).filter(User.github_id == github_id).first()
 
     if user:

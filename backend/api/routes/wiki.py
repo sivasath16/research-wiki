@@ -23,13 +23,13 @@ def _get_redis() -> redis_lib.Redis:
 
 _DISPATCH_TTL = 120  # seconds — don't re-dispatch while a task is in-flight
 
-def _dispatch_wiki_task(repo_id: int, path: str):
+def _dispatch_wiki_task(repo_id: int, path: str, user_id: int):
     """Dispatch wiki generation task, guarded by a Redis key to prevent duplicate dispatches."""
     key = f"wiki_dispatched:{repo_id}:{path}"
     r = _get_redis()
     if not r.set(key, "1", ex=_DISPATCH_TTL, nx=True):
         return  # task already dispatched and likely in-flight
-    generate_wiki_page_task.apply_async(args=[repo_id, path], queue="wiki")
+    generate_wiki_page_task.apply_async(args=[repo_id, path, user_id], queue="wiki")
 
 
 @router.get("/{repo_id}/pages")
@@ -119,13 +119,13 @@ def get_wiki_page(
         db.execute(stmt)
         db.commit()
         page = db.query(WikiPage).filter(WikiPage.repo_id == repo_id, WikiPage.path == path).first()
-        _dispatch_wiki_task(repo_id, path)
+        _dispatch_wiki_task(repo_id, path, current_user.id)
     elif page.generation_status == WikiGenerationStatus.failed:
         page.generation_status = WikiGenerationStatus.pending
         db.commit()
-        _dispatch_wiki_task(repo_id, path)
+        _dispatch_wiki_task(repo_id, path, current_user.id)
     elif page.generation_status == WikiGenerationStatus.pending:
-        _dispatch_wiki_task(repo_id, path)
+        _dispatch_wiki_task(repo_id, path, current_user.id)
 
     return _page_dict(page)
 

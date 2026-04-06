@@ -344,7 +344,7 @@ async def stream_answer(
     context = "\n\n---\n\n".join(context_parts)
 
     system_prompt = (
-        f"You are an expert code assistant helping researchers understand "
+        f"You are an expert code assistant helping engineers understand "
         f"the `{repo_owner}/{repo_name}` codebase.\n\n"
         "You have been given high-level wiki documentation AND raw code snippets as context. "
         "Use both to answer accurately. When referencing code: mention the file path and "

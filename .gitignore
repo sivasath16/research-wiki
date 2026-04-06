@@ -35,8 +35,9 @@ pgdata/
 .DS_Store
 Thumbs.db
 
-frontend-next/.next/
-frontend/
-
 dump.rdb
 security_fix.md
+
+frontend/node_modules/
+frontend/dist/
+frontend/build/

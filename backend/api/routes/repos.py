@@ -12,7 +12,8 @@ from api.middleware.auth_middleware import get_current_user
 from core.config import settings
 from core.security import decrypt_token
 from db.models import IndexStatus, Job, JobStatus, Repo, User
-from db.session import get_db
+from db.rls_context import user_rls
+from db.session import get_db, SessionLocal
 from worker.tasks import ingest_repo
 
 router = APIRouter()
@@ -75,22 +76,29 @@ async def _get_repo_meta(owner: str, name: str, token: str) -> dict:
     return {}
 
 
-async def _check_staleness(repo_id: int, owner: str, name: str, token: str, known_sha: str | None):
+async def _check_staleness(
+    repo_id: int,
+    owner: str,
+    name: str,
+    token: str,
+    known_sha: str | None,
+    user_id: int,
+):
     """Background task: check if repo has new commits, mark stale if so."""
-    from db.session import SessionLocal
-    db = SessionLocal()
-    try:
-        latest_sha = await _get_latest_sha(owner, name, token)
-        if latest_sha and known_sha and latest_sha != known_sha:
-            repo = db.query(Repo).filter(Repo.id == repo_id).first()
-            if repo and repo.index_status == IndexStatus.ready:
-                repo.index_status = IndexStatus.stale
-                repo.updated_at = datetime.utcnow()
-                db.commit()
-    except Exception:
-        pass
-    finally:
-        db.close()
+    with user_rls(user_id):
+        db = SessionLocal()
+        try:
+            latest_sha = await _get_latest_sha(owner, name, token)
+            if latest_sha and known_sha and latest_sha != known_sha:
+                repo = db.query(Repo).filter(Repo.id == repo_id).first()
+                if repo and repo.index_status == IndexStatus.ready:
+                    repo.index_status = IndexStatus.stale
+                    repo.updated_at = datetime.utcnow()
+                    db.commit()
+        except Exception:
+            pass
+        finally:
+            db.close()
 
 
 @router.post("/ingest")
@@ -207,7 +215,7 @@ async def ingest(
 
     # Enqueue Celery task — token is decrypted inside the worker, not passed as arg
     ingest_repo.apply_async(
-        args=[repo.id, job_id],
+        args=[repo.id, job_id, current_user.id],
         task_id=job_id,
     )
 
@@ -252,6 +260,7 @@ async def get_repo(
                 repo.name,
                 github_token,
                 repo.last_commit_sha,
+                current_user.id,
             )
 
     return _repo_dict(repo)

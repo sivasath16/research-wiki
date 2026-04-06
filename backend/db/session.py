@@ -1,6 +1,11 @@
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy import create_engine, event, text
+from sqlalchemy.orm import Session as OrmSession
+from sqlalchemy.orm import sessionmaker
+from starlette.requests import HTTPConnection
+
 from core.config import settings
+from core.session_cookie import try_session_user_id
+from db.rls_context import rls_oauth_service, rls_user_id
 
 engine = create_engine(
     settings.database_url,
@@ -10,6 +15,47 @@ engine = create_engine(
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+
+@event.listens_for(OrmSession, "after_begin", propagate=True)
+def _apply_rls_on_transaction_begin(session, transaction, connection, parent=None):
+    """
+    Apply RLS GUCs per transaction.
+
+    Prefer Session.info (set by get_db) so FastAPI's threadpool for sync deps does not
+    break ContextVar reset. Celery and other sync code use user_rls() ContextVars.
+    """
+    oauth = session.info.get("rls_oauth_service")
+    if oauth is None:
+        oauth = rls_oauth_service.get()
+    if oauth:
+        connection.execute(text("SELECT set_config('app.service_mode', 'on', true)"))
+        return
+
+    uid = session.info.get("rls_user_id")
+    if uid is None:
+        uid = rls_user_id.get()
+    if uid is None:
+        connection.execute(text("SELECT set_config('app.user_id', '', true)"))
+    else:
+        connection.execute(
+            text("SELECT set_config('app.user_id', :uid, true)"),
+            {"uid": str(uid)},
+        )
+
+
+def get_db(conn: HTTPConnection):
+    token = conn.cookies.get("session")
+    uid = try_session_user_id(token)
+    db = SessionLocal()
+    # Bound to this Session so RLS works when Depends(get_db) runs in a worker thread
+    # (ContextVar set/reset can span contexts; see PEP 567 + FastAPI threadpool).
+    db.info["rls_user_id"] = uid
+    db.info["rls_oauth_service"] = getattr(conn.state, "rls_oauth_service", False)
+    try:
+        yield db
+    finally:
+        db.close()
 
 
 def init_db():
@@ -42,19 +88,6 @@ def init_db():
 
     Base.metadata.create_all(bind=engine)
 
-    # HNSW index — created once here, never inside ingest tasks
-    with engine.connect() as conn:
-        conn.execute(text(f"""
-            CREATE INDEX IF NOT EXISTS chunks_embedding_hnsw
-            ON chunks USING hnsw (embedding vector_cosine_ops)
-            WITH (m = 16, ef_construction = 64)
-        """))
-        conn.commit()
-
-
-def get_db():
-    db: Session = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+    # Vector HNSW indexes are created by Alembic (0003 chunks, 0006 semantic_cache).
+    # Do not CREATE INDEX here: with FORCE ROW LEVEL SECURITY, the app role cannot
+    # build indexes over tenant data without a matching RLS context.
