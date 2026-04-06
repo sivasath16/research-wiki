@@ -2,6 +2,7 @@
 Main ingestion Celery task.
 Steps: Clone → Diff → Walk → Chunk → Embed → Insert → Generate wiki
 """
+import logging
 import os
 import shutil
 import tempfile
@@ -9,6 +10,8 @@ import subprocess
 from pathlib import Path
 from datetime import datetime
 from typing import List
+
+logger = logging.getLogger(__name__)
 
 from celery import Task
 from sqlalchemy.orm import joinedload
@@ -212,7 +215,21 @@ def ingest_repo(self: Task, repo_id: int, job_id: str):
         for i in range(0, len(all_chunks), batch_size):
             batch = all_chunks[i: i + batch_size]
             texts = [c.content for c in batch]
-            embeddings = embed_texts(texts, batch_size=batch_size)
+            try:
+                embeddings = embed_texts(texts, batch_size=batch_size)
+            except Exception:
+                if len(batch) == 1:
+                    # Single-chunk failure — unrecoverable, let Celery retry the task
+                    raise
+                # Batch failure (likely OOM) — fall back to one-at-a-time so
+                # one bad chunk doesn't abort the whole job
+                logger.warning(
+                    "Batch embedding failed at offset %d/%d, retrying one-by-one",
+                    i, len(all_chunks),
+                )
+                embeddings = []
+                for text in texts:
+                    embeddings.append(embed_texts([text], batch_size=1)[0])
 
             for chunk, emb in zip(batch, embeddings):
                 chunk_objects.append(
@@ -248,7 +265,7 @@ def ingest_repo(self: Task, repo_id: int, job_id: str):
             db.query(Chunk).filter(Chunk.repo_id == repo_id).delete()
             # Full reindex — invalidate semantic cache so users don't get stale answers
             try:
-                clear_semantic_cache(repo_id)
+                clear_semantic_cache(db, repo_id)
             except Exception:
                 pass
 

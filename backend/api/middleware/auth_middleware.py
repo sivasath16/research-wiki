@@ -1,5 +1,6 @@
-from fastapi import Request, HTTPException, Depends
+from fastapi import HTTPException, Depends
 from sqlalchemy.orm import Session
+from starlette.requests import HTTPConnection
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from db.session import get_db
 from db.models import User
@@ -20,8 +21,8 @@ def decode_session_token(token: str, max_age: int = 86400 * 30) -> int:
         raise HTTPException(status_code=401, detail="Invalid or expired session")
 
 
-def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
-    token = request.cookies.get("session")
+def get_current_user(conn: HTTPConnection, db: Session = Depends(get_db)) -> User:
+    token = conn.cookies.get("session")
     if not token:
         raise HTTPException(status_code=401, detail="Not authenticated")
     user_id = decode_session_token(token)
@@ -31,8 +32,8 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
     return user
 
 
-def get_optional_user(request: Request, db: Session = Depends(get_db)) -> User | None:
-    token = request.cookies.get("session")
+def get_optional_user(conn: HTTPConnection, db: Session = Depends(get_db)) -> User | None:
+    token = conn.cookies.get("session")
     if not token:
         return None
     try:

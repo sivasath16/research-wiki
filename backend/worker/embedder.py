@@ -19,6 +19,12 @@ def get_model() -> SentenceTransformer:
             settings.embedding_model,
             trust_remote_code=True,
         )
+        # A jina-embeddings-v2 modeling_bert.py update introduced an
+        # attn_implementation gate that fails to load from config, causing it
+        # to skip PyTorch SDPA and run a raw O(n²) matmul on the full 8192-token
+        # window. Cap at chunk_max_tokens so the model never sees inputs longer
+        # than what the chunker produces.
+        _model.max_seq_length = settings.chunk_max_tokens
     return _model
 
 

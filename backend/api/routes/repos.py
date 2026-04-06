@@ -39,6 +39,16 @@ def _parse_repo_url(url: str) -> tuple[str, str]:
     return m.group(1), m.group(2)
 
 
+def _raise_if_rate_limited(resp: httpx.Response) -> None:
+    """Raise HTTP 429 if GitHub's rate limit is exhausted."""
+    if resp.status_code == 403 and resp.headers.get("X-RateLimit-Remaining") == "0":
+        reset_ts = resp.headers.get("X-RateLimit-Reset", "")
+        detail = "GitHub API rate limit exceeded."
+        if reset_ts:
+            detail += f" Resets at Unix timestamp {reset_ts}."
+        raise HTTPException(status_code=429, detail=detail)
+
+
 async def _get_latest_sha(owner: str, name: str, token: str) -> str | None:
     async with httpx.AsyncClient() as client:
         resp = await client.get(
@@ -46,6 +56,7 @@ async def _get_latest_sha(owner: str, name: str, token: str) -> str | None:
             headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
             timeout=10,
         )
+        _raise_if_rate_limited(resp)
         if resp.status_code == 200:
             return resp.json().get("sha")
     return None
@@ -58,6 +69,7 @@ async def _get_repo_meta(owner: str, name: str, token: str) -> dict:
             headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
             timeout=10,
         )
+        _raise_if_rate_limited(resp)
         if resp.status_code == 200:
             return resp.json()
     return {}

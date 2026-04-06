@@ -9,13 +9,11 @@ Improvements over v1:
 - Chunk type filtering based on query intent
 - Multi-repo retrieval (cross-repo dependency support)
 """
-import json
-import time
+from datetime import datetime, timedelta
 from typing import AsyncGenerator, List
 
 import anthropic
 import numpy as np
-import redis as redis_lib
 from sentence_transformers import CrossEncoder
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -24,7 +22,6 @@ from worker.embedder import embed_query
 from core.config import settings
 
 _anthropic_client: anthropic.Anthropic | None = None
-_redis: redis_lib.Redis | None = None
 _reranker: CrossEncoder | None = None
 
 
@@ -33,13 +30,6 @@ def _get_anthropic() -> anthropic.Anthropic:
     if _anthropic_client is None:
         _anthropic_client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
     return _anthropic_client
-
-
-def _get_redis() -> redis_lib.Redis:
-    global _redis
-    if _redis is None:
-        _redis = redis_lib.from_url(settings.redis_url, decode_responses=True)
-    return _redis
 
 
 def _get_reranker() -> CrossEncoder:
@@ -114,62 +104,118 @@ def condense_query(query: str, history: List[dict]) -> str:
 
 # ── Semantic cache ────────────────────────────────────────────────────────────
 
-_SEM_CACHE_TTL = 3600          # 1 hour
-_SEM_CACHE_THRESHOLD = 0.95    # cosine similarity threshold
-_SEM_CACHE_MAX_ENTRIES = 100   # max entries per repo to scan
+_SEM_CACHE_TTL_HOURS = 1
+_SEM_CACHE_THRESHOLD = 0.95    # Stage 1: cosine similarity floor
+_SEM_CACHE_TOKEN_THRESHOLD = 0.5  # Stage 2: Jaccard overlap floor
+_SEM_CACHE_CANDIDATES = 5      # how many ANN neighbours to evaluate
+_SEM_CACHE_MAX_PER_REPO = 100  # evict oldest beyond this
+
+# Words that carry no intent signal — stripped before Jaccard comparison
+_STOPWORDS = {
+    "how", "do", "i", "does", "the", "a", "an", "what", "is", "are", "to",
+    "in", "this", "where", "can", "which", "codebase", "repo", "code", "me",
+    "please", "show", "tell", "explain", "give", "find", "all", "any",
+    "some", "every", "each",
+}
 
 
-def _sem_cache_key(repo_id: int) -> str:
-    # All entries for a repo stored in one Redis Hash — single HGETALL vs N GET calls
-    return f"sem_cache_v2:{repo_id}"
+def _token_overlap(a: str, b: str) -> float:
+    """Jaccard similarity on lowercased, stopword-filtered tokens."""
+    ta = {w for w in a.lower().split() if w not in _STOPWORDS}
+    tb = {w for w in b.lower().split() if w not in _STOPWORDS}
+    if not ta and not tb:
+        return 1.0
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / len(ta | tb)
 
 
-def check_semantic_cache(query_embedding: List[float], repo_id: int) -> str | None:
-    r = _get_redis()
-    entries = r.hgetall(_sem_cache_key(repo_id))
-    if not entries:
-        return None
+def check_semantic_cache(
+    db: Session,
+    query: str,
+    query_embedding: List[float],
+    repo_id: int,
+    intent: str,
+) -> str | None:
+    """
+    3-stage cache lookup:
+      Stage 1 — pgvector ANN: top-N candidates by cosine similarity >= threshold
+      Stage 2 — Lexical:      Jaccard overlap on stopword-filtered tokens >= threshold
+      Stage 3 — Intent:       stored intent label must match incoming intent
+    All three must pass; first surviving candidate wins.
+    """
+    embedding_str = "[" + ",".join(str(x) for x in query_embedding) + "]"
+    cutoff = datetime.utcnow() - timedelta(hours=_SEM_CACHE_TTL_HOURS)
 
-    q_vec = np.array(query_embedding, dtype=np.float32)
-    best_score = 0.0
-    best_response = None
+    rows = db.execute(
+        text("""
+            SELECT query_text, query_intent, response,
+                   1 - (embedding <=> CAST(:emb AS vector)) AS score
+            FROM semantic_cache
+            WHERE repo_id = :repo_id
+              AND created_at > :cutoff
+              AND 1 - (embedding <=> CAST(:emb AS vector)) >= :threshold
+            ORDER BY embedding <=> CAST(:emb AS vector)
+            LIMIT :limit
+        """),
+        {
+            "emb": embedding_str,
+            "repo_id": repo_id,
+            "cutoff": cutoff,
+            "threshold": _SEM_CACHE_THRESHOLD,
+            "limit": _SEM_CACHE_CANDIDATES,
+        },
+    ).fetchall()
 
-    for raw in list(entries.values())[:_SEM_CACHE_MAX_ENTRIES]:
-        try:
-            data = json.loads(raw)
-            cached_vec = np.array(data["embedding"], dtype=np.float32)
-            score = float(np.dot(q_vec, cached_vec))  # embeddings are L2-normalized
-            if score > best_score:
-                best_score = score
-                best_response = data["response"]
-        except Exception:
+    for row in rows:
+        # Stage 2: lexical intent check
+        if _token_overlap(query, row.query_text) < _SEM_CACHE_TOKEN_THRESHOLD:
             continue
+        # Stage 3: intent label must agree
+        if row.query_intent != intent:
+            continue
+        return row.response
 
-    if best_score >= _SEM_CACHE_THRESHOLD and best_response:
-        return best_response
     return None
 
 
-def clear_semantic_cache(repo_id: int):
+def store_semantic_cache(
+    db: Session,
+    query: str,
+    query_embedding: List[float],
+    response: str,
+    repo_id: int,
+    intent: str,
+) -> None:
+    embedding_str = "[" + ",".join(str(x) for x in query_embedding) + "]"
+    db.execute(
+        text("""
+            INSERT INTO semantic_cache (repo_id, query_text, query_intent, embedding, response)
+            VALUES (:repo_id, :query, :intent, CAST(:emb AS vector), :response)
+        """),
+        {"repo_id": repo_id, "query": query, "intent": intent, "emb": embedding_str, "response": response},
+    )
+    # Evict oldest rows beyond the per-repo cap
+    db.execute(
+        text("""
+            DELETE FROM semantic_cache
+            WHERE repo_id = :repo_id
+              AND id NOT IN (
+                SELECT id FROM semantic_cache
+                WHERE repo_id = :repo_id
+                ORDER BY created_at DESC
+                LIMIT :cap
+              )
+        """),
+        {"repo_id": repo_id, "cap": _SEM_CACHE_MAX_PER_REPO},
+    )
+    db.commit()
+
+
+def clear_semantic_cache(db: Session, repo_id: int) -> None:
     """Drop all cached responses for a repo — called on full reindex."""
-    _get_redis().delete(_sem_cache_key(repo_id))
-
-
-def store_semantic_cache(query_embedding: List[float], response: str, repo_id: int):
-    r = _get_redis()
-    cache_key = _sem_cache_key(repo_id)
-    field = str(int(time.time() * 1000))
-    r.hset(cache_key, field, json.dumps({
-        "embedding": query_embedding,
-        "response": response,
-    }))
-    r.expire(cache_key, _SEM_CACHE_TTL)
-
-    # Evict oldest entries beyond the cap
-    all_fields = r.hkeys(cache_key)
-    if len(all_fields) > _SEM_CACHE_MAX_ENTRIES:
-        oldest = sorted(all_fields)[: len(all_fields) - _SEM_CACHE_MAX_ENTRIES]
-        r.hdel(cache_key, *oldest)
+    db.execute(text("DELETE FROM semantic_cache WHERE repo_id = :repo_id"), {"repo_id": repo_id})
+    db.commit()
 
 
 # ── Retrieval ─────────────────────────────────────────────────────────────────
@@ -267,10 +313,12 @@ async def stream_answer(
     repo_owner: str,
     repo_name: str,
     chunks: List[dict],
+    db: Session,
     repo_id: int = 0,
     history: List[dict] | None = None,
     query_embedding: List[float] | None = None,
     wiki_pages: List[dict] | None = None,
+    intent: str = "general",
 ) -> AsyncGenerator[str, None]:
     """Stream Claude Sonnet answer token by token with semantic caching."""
     client = _get_anthropic()
@@ -279,7 +327,7 @@ async def stream_answer(
         query_embedding = embed_query(query)
 
     if not history:
-        cached = check_semantic_cache(query_embedding, repo_id)
+        cached = check_semantic_cache(db, query, query_embedding, repo_id, intent)
         if cached:
             yield cached
             return
@@ -320,7 +368,7 @@ async def stream_answer(
 
     # Cache first-turn responses for semantic reuse
     if not history and full_response:
-        store_semantic_cache(query_embedding, full_response, repo_id)
+        store_semantic_cache(db, query, query_embedding, full_response, repo_id, intent)
 
 
 def get_relevant_wiki_pages(db: Session, repo_id: int, query: str, top_k: int = 2) -> List[dict]:

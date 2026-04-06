@@ -10,14 +10,14 @@ Cross-repo detection:
 import asyncio
 import json
 import logging
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session
 
-from api.middleware.auth_middleware import decode_session_token
+from api.middleware.auth_middleware import get_current_user
 from core.config import settings
 from core.rate_limit import consume, get_remaining
 from db.models import Repo, User
-from db.session import SessionLocal
+from db.session import get_db
 from rag.retriever import (
     retrieve_chunks, rerank_chunks, stream_answer, get_source_references,
     condense_query, classify_query_intent, _chunk_types_for_intent,
@@ -61,42 +61,19 @@ def _find_dependent_repos(db: Session, repo: Repo, user_id: int) -> list[Repo]:
 
 
 @router.websocket("/chat/{repo_id}")
-async def chat_ws(repo_id: int, websocket: WebSocket):
+async def chat_ws(
+    repo_id: int,
+    websocket: WebSocket,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     await websocket.accept()
-    db: Session = SessionLocal()
 
     # Per-connection conversation history
     history: list[dict] = []
 
     try:
-        # ── Auth ──────────────────────────────────────────────────────
-        cookies_header = websocket.headers.get("cookie", "")
-        session_token = None
-        for part in cookies_header.split(";"):
-            part = part.strip()
-            if part.startswith("session="):
-                session_token = part[len("session="):]
-                break
-
-        if not session_token:
-            await _ws_send(websocket, {"type": "error", "message": "Not authenticated"})
-            await websocket.close(code=4001)
-            return
-
-        try:
-            user_id = decode_session_token(session_token)
-        except Exception:
-            await _ws_send(websocket, {"type": "error", "message": "Invalid session"})
-            await websocket.close(code=4001)
-            return
-
-        user = db.query(User).filter(User.id == user_id).first()
-        if not user:
-            await _ws_send(websocket, {"type": "error", "message": "User not found"})
-            await websocket.close(code=4001)
-            return
-
-        repo = db.query(Repo).filter(Repo.id == repo_id, Repo.user_id == user_id).first()
+        repo = db.query(Repo).filter(Repo.id == repo_id, Repo.user_id == current_user.id).first()
         if not repo:
             await _ws_send(websocket, {"type": "error", "message": "Repo not found"})
             await websocket.close(code=4003)
@@ -107,7 +84,7 @@ async def chat_ws(repo_id: int, websocket: WebSocket):
             await websocket.close(code=4004)
             return
 
-        remaining = get_remaining(user_id)
+        remaining = get_remaining(current_user.id)
         await _ws_send(websocket, {
             "type": "connected",
             "repo": {"owner": repo.owner, "name": repo.name},
@@ -125,6 +102,10 @@ async def chat_ws(repo_id: int, websocket: WebSocket):
                 msg = json.loads(raw)
             except json.JSONDecodeError:
                 await _ws_send(websocket, {"type": "error", "message": "Invalid JSON"})
+                continue
+
+            if msg.get("type") == "ping":
+                await _ws_send(websocket, {"type": "pong"})
                 continue
 
             if msg.get("type") != "message":
@@ -145,7 +126,7 @@ async def chat_ws(repo_id: int, websocket: WebSocket):
             extra_repo_ids: list[int] = msg.get("extra_repo_ids", [])
 
             # Rate limit
-            allowed, remaining = consume(user_id)
+            allowed, remaining = consume(current_user.id)
             if not allowed:
                 await _ws_send(websocket, {
                     "type": "rate_limited",
@@ -182,7 +163,7 @@ async def chat_ws(repo_id: int, websocket: WebSocket):
             if not extra_repo_ids and chunks:
                 max_score = max(c["score"] for c in chunks)
                 if max_score < LOW_CONFIDENCE_THRESHOLD:
-                    dep_repos = _find_dependent_repos(db, repo, user_id)
+                    dep_repos = _find_dependent_repos(db, repo, current_user.id)
                     if dep_repos:
                         await _ws_send(websocket, {
                             "type": "dependency_suggestion",
@@ -218,10 +199,12 @@ async def chat_ws(repo_id: int, websocket: WebSocket):
                     repo.owner,
                     repo.name,
                     top_chunks,
+                    db=db,
                     repo_id=repo_id,
                     history=history[-MAX_HISTORY_TURNS * 2:],
                     query_embedding=query_embedding,
                     wiki_pages=wiki_pages,
+                    intent=intent,
                 ):
                     full_answer += token
                     await _ws_send(websocket, {"type": "token", "content": token})
@@ -248,5 +231,3 @@ async def chat_ws(repo_id: int, websocket: WebSocket):
             await _ws_send(websocket, {"type": "error", "message": "Server error"})
         except Exception:
             pass
-    finally:
-        db.close()
