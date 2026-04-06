@@ -4,7 +4,7 @@ A production-grade DeepWiki clone for university research groups. Index GitHub r
 
 ## Stack
 
-- **Frontend**: React 18 + Vite + React Router v6 + Tailwind CSS
+- **Frontend**: Next.js + Tailwind CSS
 - **Backend**: FastAPI + Celery + Redis
 - **Database**: PostgreSQL 16 + pgvector (HNSW index)
 - **Auth**: GitHub OAuth 2.0 (httpOnly cookie session)
