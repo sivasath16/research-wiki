@@ -36,3 +36,7 @@ pgdata/
 Thumbs.db
 
 frontend-next/.next/
+frontend/
+
+dump.rdb
+security_fix.md

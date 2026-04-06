@@ -3,6 +3,9 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { WS_BASE } from "@/lib/api";
 
+const HEARTBEAT_INTERVAL = 25_000; // keep-alive ping, well under nginx's read timeout
+const MAX_RETRY_DELAY = 30_000;
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant";
@@ -42,6 +45,13 @@ export function useWebSocket(repoId: number | null) {
   const [rateLimit, setRateLimit] = useState<RateLimit>({ remaining: 20, limit: 20 });
   const wsRef = useRef<WebSocket | null>(null);
   const streamingIdRef = useRef<string | null>(null);
+  const retryCountRef = useRef(0);
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const heartbeatTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const intentionalCloseRef = useRef(false);
+  const pendingQueueRef = useRef<string[]>([]);
+  // Ref so onclose closure always calls the latest connect (avoids stale repoId)
+  const connectRef = useRef<() => void>(() => {});
 
   const connect = useCallback(() => {
     if (!repoId || wsRef.current?.readyState === WebSocket.OPEN) return;
@@ -49,12 +59,29 @@ export function useWebSocket(repoId: number | null) {
     const ws = new WebSocket(`${WS_BASE}/ws/chat/${repoId}`);
     wsRef.current = ws;
 
-    ws.onopen = () => setStatus("connected");
+    ws.onopen = () => {
+      setStatus("connected");
+      retryCountRef.current = 0;
+
+      // Start heartbeat to keep the connection alive through the proxy
+      heartbeatTimerRef.current = setInterval(() => {
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({ type: "ping" }));
+        }
+      }, HEARTBEAT_INTERVAL);
+
+      // Flush any messages queued while the socket was down
+      const pending = pendingQueueRef.current.splice(0);
+      pending.forEach((msg) => ws.send(msg));
+    };
 
     ws.onmessage = (event) => {
       const msg = JSON.parse(event.data);
 
       switch (msg.type) {
+        case "pong":
+          break;
+
         case "connected":
           if (msg.rate_limit) setRateLimit(msg.rate_limit);
           break;
@@ -90,7 +117,6 @@ export function useWebSocket(repoId: number | null) {
         }
 
         case "dependency_suggestion":
-          // Show inline prompt asking user if they want to include dependent repos
           setMessages((prev) => [
             ...prev,
             {
@@ -105,7 +131,6 @@ export function useWebSocket(repoId: number | null) {
           break;
 
         case "retrieving":
-          // No-op — could add a "thinking" indicator here
           break;
 
         case "rate_limited":
@@ -125,31 +150,67 @@ export function useWebSocket(repoId: number | null) {
       }
     };
 
-    ws.onclose = () => { setStatus("disconnected"); wsRef.current = null; };
+    ws.onclose = () => {
+      setStatus("disconnected");
+      wsRef.current = null;
+      if (heartbeatTimerRef.current) {
+        clearInterval(heartbeatTimerRef.current);
+        heartbeatTimerRef.current = null;
+      }
+      if (!intentionalCloseRef.current) {
+        // Exponential backoff: 1s, 2s, 4s, … capped at 30s
+        const delay = Math.min(1000 * 2 ** retryCountRef.current, MAX_RETRY_DELAY);
+        retryCountRef.current += 1;
+        retryTimerRef.current = setTimeout(() => connectRef.current(), delay);
+      }
+    };
+
     ws.onerror = () => setStatus("error");
   }, [repoId]);
 
+  connectRef.current = connect;
+
   const disconnect = useCallback(() => {
+    intentionalCloseRef.current = true;
+    if (retryTimerRef.current) {
+      clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
+    if (heartbeatTimerRef.current) {
+      clearInterval(heartbeatTimerRef.current);
+      heartbeatTimerRef.current = null;
+    }
     wsRef.current?.close();
     wsRef.current = null;
     setStatus("disconnected");
   }, []);
 
   useEffect(() => {
-    if (repoId) connect();
+    if (repoId) {
+      intentionalCloseRef.current = false;
+      connect();
+    }
     return () => disconnect();
   }, [repoId, connect, disconnect]);
 
   const sendMessage = useCallback(
     (content: string, extraRepoIds?: number[]) => {
-      if (wsRef.current?.readyState !== WebSocket.OPEN) { connect(); return; }
       const userMsg: ChatMessage = { id: crypto.randomUUID(), role: "user", content };
       setMessages((prev) => [...prev, userMsg]);
-      wsRef.current.send(JSON.stringify({
+
+      const payload = JSON.stringify({
         type: "message",
         content,
         ...(extraRepoIds?.length ? { extra_repo_ids: extraRepoIds } : {}),
-      }));
+      });
+
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(payload);
+      } else {
+        // Queue and reconnect — message will be sent once the socket opens
+        pendingQueueRef.current.push(payload);
+        connect();
+      }
     },
     [connect]
   );
