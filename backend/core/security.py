@@ -5,8 +5,10 @@ from core.config import settings
 def _get_fernet() -> Fernet:
     key = settings.fernet_key
     if not key:
-        # Generate a dev key if not configured — not safe for production
-        key = Fernet.generate_key().decode()
+        raise RuntimeError(
+            "FERNET_KEY is not set. "
+            "Generate one with: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+        )
     return Fernet(key.encode() if isinstance(key, str) else key)
 
 

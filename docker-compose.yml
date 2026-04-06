@@ -18,6 +18,24 @@ services:
       timeout: 5s
       retries: 10
 
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-rwuser}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+      RABBITMQ_DEFAULT_VHOST: /
+    ports:
+      - "127.0.0.1:5672:5672"    # AMQP
+      - "127.0.0.1:15672:15672"  # Management UI
+    volumes:
+      - rabbitmqdata:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
   redis:
     image: redis:7-alpine
     restart: unless-stopped
@@ -56,6 +74,7 @@ services:
     environment:
       - DATABASE_URL=${DATABASE_URL:-postgresql://rwuser:rwpass@postgres:5432/researchwiki}
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-rwuser}:${RABBITMQ_PASSWORD}@rabbitmq:5672//
       - GITHUB_CLIENT_ID=${GITHUB_CLIENT_ID}
       - GITHUB_CLIENT_SECRET=${GITHUB_CLIENT_SECRET}
       - GITHUB_CALLBACK_URL=${GITHUB_CALLBACK_URL:-https://localhost/auth/callback}
@@ -70,6 +89,8 @@ services:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      rabbitmq:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8001/health || exit 1"]
@@ -92,6 +113,7 @@ services:
     environment:
       - DATABASE_URL=${DATABASE_URL:-postgresql://rwuser:rwpass@postgres:5432/researchwiki}
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-rwuser}:${RABBITMQ_PASSWORD}@rabbitmq:5672//
       - GITHUB_CLIENT_ID=${GITHUB_CLIENT_ID}
       - GITHUB_CLIENT_SECRET=${GITHUB_CLIENT_SECRET}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
@@ -105,8 +127,16 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
       backend:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A worker.celery_app inspect ping --timeout=5 -d celery@$$HOSTNAME || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
   celery-flower:
     build:
@@ -122,8 +152,10 @@ services:
       - "127.0.0.1:5555:5555"
     environment:
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-rwuser}:${RABBITMQ_PASSWORD}@rabbitmq:5672//
     depends_on:
       - redis
+      - rabbitmq
 
   frontend:
     build:
@@ -155,4 +187,5 @@ services:
 volumes:
   pgdata:
   redisdata:
+  rabbitmqdata:
   model_cache:

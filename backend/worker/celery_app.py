@@ -3,8 +3,8 @@ from core.config import settings
 
 celery_app = Celery(
     "researchwiki",
-    broker=settings.redis_url,
-    backend=settings.redis_url,
+    broker=settings.rabbitmq_url,   # RabbitMQ — durable queues, per-message acks
+    backend=settings.redis_url,     # Redis — fast result/state storage
     include=["worker.tasks"],
 )
 

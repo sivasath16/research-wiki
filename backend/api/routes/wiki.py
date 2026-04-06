@@ -1,6 +1,8 @@
+import re
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 import redis as redis_lib
 
 from api.middleware.auth_middleware import get_current_user
@@ -104,18 +106,19 @@ def get_wiki_page(
             else:
                 page_title = path.split("/")[-1].replace("_", " ").title()
 
-        page = WikiPage(
+        # Upsert to avoid IntegrityError on concurrent requests for the same page
+        stmt = pg_insert(WikiPage).values(
             repo_id=repo_id,
             path=path,
             title=page_title,
             content_md=None,
             mermaid_diagram=None,
             generated_at=None,
-            generation_status=WikiGenerationStatus.pending,
-        )
-        db.add(page)
+            generation_status=WikiGenerationStatus.pending.value,
+        ).on_conflict_do_nothing(index_elements=["repo_id", "path"])
+        db.execute(stmt)
         db.commit()
-        db.refresh(page)
+        page = db.query(WikiPage).filter(WikiPage.repo_id == repo_id, WikiPage.path == path).first()
         _dispatch_wiki_task(repo_id, path)
     elif page.generation_status == WikiGenerationStatus.failed:
         page.generation_status = WikiGenerationStatus.pending
@@ -127,14 +130,33 @@ def get_wiki_page(
     return _page_dict(page)
 
 
+# Tags that can execute scripts or load external resources — strip from AI output
+_DANGEROUS = re.compile(
+    r"<(script|iframe|object|embed|form|input|button|link|meta|style)\b[^>]*>.*?</\1>"
+    r"|<(script|iframe|object|embed|form|input|button|link|meta|style)\b[^>]*/?>",
+    re.IGNORECASE | re.DOTALL,
+)
+_DANGEROUS_ATTRS = re.compile(r'\s+on\w+\s*=\s*["\'][^"\']*["\']', re.IGNORECASE)
+_JS_HREF = re.compile(r'href\s*=\s*["\']javascript:[^"\']*["\']', re.IGNORECASE)
+
+
+def _sanitize(text: str | None) -> str | None:
+    if not text:
+        return text
+    text = _DANGEROUS.sub("", text)
+    text = _DANGEROUS_ATTRS.sub("", text)
+    text = _JS_HREF.sub('href="#"', text)
+    return text
+
+
 def _page_dict(page: WikiPage) -> dict:
     return {
         "id": page.id,
         "repo_id": page.repo_id,
         "path": page.path,
         "title": page.title,
-        "content_md": page.content_md,
-        "mermaid_diagram": page.mermaid_diagram,
+        "content_md": _sanitize(page.content_md),
+        "mermaid_diagram": _sanitize(page.mermaid_diagram),
         "generated_at": page.generated_at.isoformat() if page.generated_at else None,
         "generation_status": page.generation_status,
         "generating": page.generation_status in (WikiGenerationStatus.pending, WikiGenerationStatus.running),

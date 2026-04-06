@@ -98,9 +98,14 @@ def _get_changed_files(tmpdir: str, old_sha: str) -> List[str] | None:
     return None
 
 
-def _mask_token(url: str, token: str) -> str:
-    """Replace the token in a clone URL so it doesn't appear in logs or tracebacks."""
-    return url.replace(token, "***") if token else url
+def _safe_error(exc: Exception) -> str:
+    """Return a user-facing error string that contains no internal detail."""
+    msg = str(exc)
+    if "clone" in msg.lower() or "git" in msg.lower():
+        return "Repository could not be cloned. Check the URL and your access permissions."
+    if "embed" in msg.lower() or "model" in msg.lower():
+        return "Embedding failed. The repository may contain files the model cannot process."
+    return "Indexing failed. Please try again."
 
 
 @celery_app.task(bind=True, name="worker.tasks.ingest_repo", max_retries=2, queue="ingest")
@@ -121,15 +126,33 @@ def ingest_repo(self: Task, repo_id: int, job_id: str):
         _update_repo_status(db, repo_id, IndexStatus.indexing)
 
         tmpdir = tempfile.mkdtemp(prefix="rw_clone_")
-        clone_url = f"https://x-access-token:{github_token}@github.com/{repo.owner}/{repo.name}.git"
 
-        result = subprocess.run(
-            ["git", "clone", "--depth=50", "--single-branch", clone_url, tmpdir],
-            capture_output=True, text=True, timeout=300,
-        )
+        # Write token to a temp credential file so it never appears in process listings
+        cred_file = tempfile.NamedTemporaryFile(mode="w", suffix=".gitcredentials", delete=False)
+        cred_file.write(f"https://x-access-token:{github_token}@github.com\n")
+        cred_file.close()
+        cred_path = cred_file.name
+
+        try:
+            clone_env = {
+                **os.environ,
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "credential.helper",
+                "GIT_CONFIG_VALUE_0": f"store --file={cred_path}",
+            }
+            result = subprocess.run(
+                ["git", "clone", "--depth=50", "--single-branch",
+                 f"https://github.com/{repo.owner}/{repo.name}.git", tmpdir],
+                capture_output=True, text=True, timeout=300, env=clone_env,
+            )
+        finally:
+            try:
+                os.unlink(cred_path)
+            except Exception:
+                pass
+
         if result.returncode != 0:
-            safe_stderr = _mask_token(result.stderr[:500], github_token)
-            raise RuntimeError(f"Git clone failed: {safe_stderr}")
+            raise RuntimeError(f"Git clone failed: {result.stderr[:200]}")
 
         sha_result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -370,12 +393,14 @@ def ingest_repo(self: Task, repo_id: int, job_id: str):
         _update_job(db, job_id, "Completed", 100, JobStatus.completed)
 
     except Exception as exc:
+        logger.exception("ingest_repo failed repo_id=%s job_id=%s", repo_id, job_id)
         db.rollback()
-        _update_repo_status(db, repo_id, IndexStatus.failed, error_message=str(exc)[:1000])
+        safe_msg = _safe_error(exc)
+        _update_repo_status(db, repo_id, IndexStatus.failed, error_message=safe_msg)
         job = db.query(Job).filter(Job.id == job_id).first()
         if job:
             job.status = JobStatus.failed
-            job.error = str(exc)[:1000]
+            job.error = safe_msg
             job.updated_at = datetime.utcnow()
             db.commit()
         raise

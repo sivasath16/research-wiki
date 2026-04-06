@@ -1,4 +1,4 @@
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings
 from typing import Optional
 
@@ -6,6 +6,7 @@ from typing import Optional
 class Settings(BaseSettings):
     database_url: str = "postgresql://rwuser:rwpass@localhost:5432/researchwiki"
     redis_url: str = "redis://localhost:6379"
+    rabbitmq_url: str = "amqp://guest:guest@localhost:5672//"
 
     github_client_id: str = ""
     github_client_secret: str = ""
@@ -17,6 +18,8 @@ class Settings(BaseSettings):
     secret_key: str = "change-me-in-production"
 
     frontend_url: str = "http://localhost"
+    # Explicit CORS allowlist — defaults to frontend_url only if not set
+    cors_origins: list[str] = Field(default_factory=list)
 
     # Cookie security — set True in production (requires HTTPS)
     cookie_secure: bool = False
@@ -57,6 +60,8 @@ class Settings(BaseSettings):
             raise ValueError("ANTHROPIC_API_KEY must be set.")
         if not self.github_client_id or not self.github_client_secret:
             raise ValueError("GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET must be set.")
+        if not self.cors_origins:
+            self.cors_origins = [self.frontend_url]
         return self
 
     class Config:

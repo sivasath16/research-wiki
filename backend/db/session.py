@@ -31,13 +31,12 @@ def init_db():
                 # pgvector stores dim as (dim + 1) in atttypmod
                 current_dim = result[0] - 1
                 if current_dim != EMBEDDING_DIM:
-                    logger.warning(
-                        "Embedding dimension mismatch (DB=%d, code=%d). "
-                        "Dropping chunks table — all repos will need re-indexing.",
-                        current_dim, EMBEDDING_DIM
+                    raise RuntimeError(
+                        f"Embedding dimension mismatch: database has {current_dim}D vectors, "
+                        f"code expects {EMBEDDING_DIM}D. "
+                        f"Run `alembic upgrade head` or manually drop the chunks table "
+                        f"after backing up data. Never drops automatically."
                     )
-                    conn.execute(text("DROP TABLE IF EXISTS chunks CASCADE"))
-                    conn.commit()
         except Exception:
             pass  # Table doesn't exist yet — create_all handles it
 

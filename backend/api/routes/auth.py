@@ -10,7 +10,7 @@ from db.session import get_db
 from db.models import User
 from core.config import settings
 from core.security import encrypt_token
-from api.middleware.auth_middleware import create_session_token, get_current_user
+from api.middleware.auth_middleware import create_session_token, get_current_user, revoke_session_token
 
 router = APIRouter()
 
@@ -128,6 +128,9 @@ async def me(current_user: User = Depends(get_current_user)):
 
 
 @router.post("/logout")
-async def logout(response: Response):
+async def logout(request: Request, response: Response):
+    token = request.cookies.get("session")
+    if token:
+        revoke_session_token(token)
     response.delete_cookie("session")
     return {"status": "logged out"}

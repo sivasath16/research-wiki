@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel, Field, field_validator, ValidationError
 from sqlalchemy.orm import Session
 
 from api.middleware.auth_middleware import get_current_user
@@ -30,6 +31,19 @@ logger = logging.getLogger(__name__)
 MAX_QUERY_LENGTH = 2000
 MAX_HISTORY_TURNS = 6
 LOW_CONFIDENCE_THRESHOLD = 0.5
+
+
+class _WsMessage(BaseModel):
+    type: str
+    content: str = Field(default="", max_length=MAX_QUERY_LENGTH)
+    extra_repo_ids: list[int] = Field(default_factory=list, max_length=10)
+
+    @field_validator("extra_repo_ids")
+    @classmethod
+    def validate_repo_ids(cls, v: list[int]) -> list[int]:
+        if any(rid <= 0 for rid in v):
+            raise ValueError("repo IDs must be positive integers")
+        return v
 
 
 async def _ws_send(ws: WebSocket, msg: dict):
@@ -99,31 +113,33 @@ async def chat_ws(
                 break
 
             try:
-                msg = json.loads(raw)
-            except json.JSONDecodeError:
-                await _ws_send(websocket, {"type": "error", "message": "Invalid JSON"})
+                msg = _WsMessage.model_validate(json.loads(raw))
+            except (json.JSONDecodeError, ValidationError):
+                await _ws_send(websocket, {"type": "error", "message": "Invalid message"})
                 continue
 
-            if msg.get("type") == "ping":
+            if msg.type == "ping":
                 await _ws_send(websocket, {"type": "pong"})
                 continue
 
-            if msg.get("type") != "message":
+            if msg.type != "message":
                 continue
 
-            query = msg.get("content", "").strip()
+            query = msg.content.strip()
             if not query:
                 continue
 
-            if len(query) > MAX_QUERY_LENGTH:
-                await _ws_send(websocket, {
-                    "type": "error",
-                    "message": f"Query too long (max {MAX_QUERY_LENGTH} characters)",
-                })
-                continue
-
-            # Extra repo IDs from cross-repo confirmation
-            extra_repo_ids: list[int] = msg.get("extra_repo_ids", [])
+            # Validate extra_repo_ids ownership — drop any IDs not owned by this user
+            extra_repo_ids: list[int] = []
+            if msg.extra_repo_ids:
+                owned = {
+                    r[0] for r in db.query(Repo.id).filter(
+                        Repo.user_id == current_user.id,
+                        Repo.id.in_(msg.extra_repo_ids),
+                        Repo.index_status.in_(["ready", "stale"]),
+                    ).all()
+                }
+                extra_repo_ids = [r for r in msg.extra_repo_ids if r in owned]
 
             # Rate limit
             allowed, remaining = consume(current_user.id)
