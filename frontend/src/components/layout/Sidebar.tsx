@@ -112,7 +112,7 @@ export function Sidebar({ repo, currentPath, onNavigate, allRepos = [] }: Sideba
       <div className="px-4 py-3 border-b border-zinc-200 dark:border-zinc-800 flex items-center gap-2">
         <BookOpen size={16} className="text-[#1D9E75] flex-shrink-0" />
         <Link to="/" className="font-semibold text-sm text-zinc-900 dark:text-zinc-100">
-          ResearchWiki
+          CodeAtlas
         </Link>
       </div>
 

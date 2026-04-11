@@ -116,6 +116,9 @@ def ingest_repo(self: Task, repo_id: int, job_id: str, user_id: int):
         tmpdir = None
 
         try:
+            # First DB write as soon as the worker picks up the task — confirms Celery is running
+            _update_job(db, job_id, "Starting indexer…", 2)
+
             repo = db.query(Repo).options(joinedload(Repo.user)).filter(Repo.id == repo_id).first()
             if not repo:
                 raise ValueError(f"Repo {repo_id} not found")

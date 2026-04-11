@@ -38,8 +38,11 @@ class Settings(BaseSettings):
     max_file_lines: int = 10000
     chunk_max_tokens: int = 512
     chunk_min_tokens: int = 50
-    embed_batch_size: int = 64
+    # Larger batches use GPU/MPS better; raise until you hit OOM, then lower (e.g. 32–128).
+    embed_batch_size: int = 96
     max_repo_size_kb: int = 500_000  # 500MB
+    # Must exceed worst-case ingest duration or the API may allow a duplicate index (lock expires).
+    index_lock_ttl_seconds: int = 8 * 3600
 
     # Max concurrent ingestion jobs per user
     max_concurrent_jobs: int = 3

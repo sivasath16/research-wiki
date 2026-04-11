@@ -30,7 +30,7 @@ export function TopBar({ repo, currentPage, onReindex, reindexing }: TopBarProps
           to="/"
           className="text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors flex-shrink-0"
         >
-          ResearchWiki
+          CodeAtlas
         </Link>
         {repo && (
           <>

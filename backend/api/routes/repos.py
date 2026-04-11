@@ -194,9 +194,8 @@ async def ingest(
         db.commit()
         db.refresh(repo)
 
-    # Acquire Redis lock (TTL = 10min)
     lock_key = f"index_lock:{repo.id}"
-    get_redis().set(lock_key, "1", ex=600)
+    get_redis().set(lock_key, "1", ex=settings.index_lock_ttl_seconds)
 
     # Create job record
     job_id = str(uuid.uuid4())

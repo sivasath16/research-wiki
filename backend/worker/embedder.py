@@ -5,6 +5,7 @@ Singleton pattern so the model loads once per worker process.
 """
 from typing import List
 import numpy as np
+import torch
 from sentence_transformers import SentenceTransformer
 from core.config import settings
 
@@ -28,18 +29,21 @@ def get_model() -> SentenceTransformer:
     return _model
 
 
-def embed_texts(texts: List[str], batch_size: int = 64) -> List[List[float]]:
+def embed_texts(texts: List[str], batch_size: int | None = None) -> List[List[float]]:
+    bs = settings.embed_batch_size if batch_size is None else batch_size
     model = get_model()
-    embeddings = model.encode(
-        texts,
-        batch_size=batch_size,
-        normalize_embeddings=True,
-        show_progress_bar=False,
-    )
+    with torch.inference_mode():
+        embeddings = model.encode(
+            texts,
+            batch_size=bs,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+        )
     return embeddings.tolist()
 
 
 def embed_query(query: str) -> List[float]:
     model = get_model()
-    embedding = model.encode(query, normalize_embeddings=True)
+    with torch.inference_mode():
+        embedding = model.encode(query, normalize_embeddings=True)
     return embedding.tolist()

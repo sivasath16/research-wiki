@@ -1,13 +1,14 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import { BookOpen, Github, Moon, Sun, Plus, X, CheckCircle, Loader2 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
-import { ingestRepo, listRepos, jobStreamUrl, getLoginUrl, logout, type Repo } from "@/lib/api";
+import { ingestRepo, listRepos, jobStreamUrl, getLoginUrl, logout, type Repo, type Job } from "@/lib/api";
 import { RepoCard } from "@/components/shared/RepoCard";
 import { RepoCardSkeleton } from "@/components/shared/SkeletonLoader";
 import { useAppStore } from "@/store/appStore";
 import { cn } from "@/lib/utils";
 
 const PROGRESS_STEPS = [
+  "Starting indexer…",
   "Cloning repository",
   "Walking files",
   "Chunking files",
@@ -36,7 +37,7 @@ export default function HomePage() {
     jobId: null, repoId: null, status: "idle", step: "", pct: 0, error: null
   });
   const navigate = useNavigate();
-  const esRef = useRef<EventSource | null>(null);
+  const [workerHint, setWorkerHint] = useState(false);
 
   const loadRepos = () => {
     if (!user) return;
@@ -52,43 +53,58 @@ export default function HomePage() {
   }, [user]);
 
   useEffect(() => {
-    if (!ingest.jobId || ingest.status === "completed" || ingest.status === "failed") return;
+    if (!ingest.jobId) return;
 
-    esRef.current?.close();
-    const es = new EventSource(jobStreamUrl(ingest.jobId), { withCredentials: true });
-    esRef.current = es;
+    const id = ingest.jobId;
+    const es = new EventSource(jobStreamUrl(id), { withCredentials: true });
 
-    es.onmessage = (event) => {
+    es.onmessage = (e: MessageEvent) => {
       try {
-        const job = JSON.parse(event.data);
-        setIngest((prev) => ({
-          ...prev,
-          status: job.status as IngestState["status"],
-          step: job.progress_step || "",
-          pct: job.progress_pct,
-          error: job.error,
-        }));
-
+        const data = JSON.parse(e.data) as Partial<Job> & { error?: string };
+        if (!data.id) {
+          setIngest((prev) =>
+            prev.jobId !== id ? prev : { ...prev, status: "failed", error: data.error ?? "Job not found" }
+          );
+          es.close();
+          return;
+        }
+        const job = data as Job;
+        setIngest((prev) => {
+          if (prev.jobId !== id) return prev;
+          return {
+            ...prev,
+            status: job.status as IngestState["status"],
+            step: job.progress_step || "",
+            pct: job.progress_pct ?? 0,
+            error: job.error ?? null,
+          };
+        });
         if (job.status === "completed") {
           es.close();
           loadRepos();
-          const rid = typeof job.repo_id === "number" ? job.repo_id : ingest.repoId;
-          setTimeout(() => {
-            if (rid != null) navigate(`/wiki/${rid}`);
-          }, 800);
+          setTimeout(() => navigate(`/wiki/${job.repo_id}`), 800);
         } else if (job.status === "failed") {
           es.close();
           loadRepos();
         }
       } catch {
-        /* ignore */
+        /* ignore parse errors */
       }
     };
 
     es.onerror = () => es.close();
 
     return () => es.close();
-  }, [ingest.jobId]);
+  }, [ingest.jobId, navigate]);
+
+  useEffect(() => {
+    if (!ingest.jobId || ingest.status === "completed" || ingest.status === "failed") {
+      setWorkerHint(false);
+      return;
+    }
+    const t = window.setTimeout(() => setWorkerHint(true), 12000);
+    return () => clearTimeout(t);
+  }, [ingest.jobId, ingest.status]);
 
   const handleIngest = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -135,7 +151,7 @@ export default function HomePage() {
           <div className="flex items-center gap-2">
             <BookOpen size={16} className="text-[#1D9E75]" />
             <span className="font-semibold text-sm text-zinc-900 dark:text-zinc-100">
-              ResearchWiki
+              CodeAtlas
             </span>
           </div>
           <div className="flex items-center gap-3">
@@ -307,6 +323,19 @@ export default function HomePage() {
 
               {ingest.error && (
                 <p className="mt-2 text-xs text-red-500">{ingest.error}</p>
+              )}
+
+              {workerHint && ingest.pct < 1 && isIngesting && (
+                <p className="mt-3 text-xs text-amber-700 dark:text-amber-400 leading-relaxed">
+                  Progress is still at 0% — indexing runs in a{" "}
+                  <strong className="font-medium">Celery worker</strong>, not the API process. Start a worker
+                  that consumes the <code className="font-mono text-[10px]">ingest</code> queue, for example:
+                </p>
+              )}
+              {workerHint && ingest.pct < 1 && isIngesting && (
+                <pre className="mt-2 p-3 rounded-md bg-zinc-100 dark:bg-zinc-800 text-[10px] font-mono text-zinc-700 dark:text-zinc-300 overflow-x-auto">
+                  cd backend && celery -A worker.celery_app worker --pool=solo --queues=ingest,wiki --loglevel=info
+                </pre>
               )}
             </div>
           )}

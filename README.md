@@ -136,12 +136,14 @@ export SECRET_KEY=... FERNET_KEY=... ANTHROPIC_API_KEY=... GITHUB_CLIENT_ID=... 
 uvicorn api.main:app --reload --port 8001
 ```
 
-**Celery worker** — same env:
+**Celery worker** — same env (required for indexing and wiki generation; the API only enqueues work):
 
 ```bash
 cd backend
 celery -A worker.celery_app worker --queues=ingest,wiki --concurrency=2 --loglevel=info
 ```
+
+If **indexing stays at 0%**, the worker is not running or is not subscribed to the **`ingest`** queue. Confirm RabbitMQ matches `RABBITMQ_URL` in the worker environment and that the command includes `--queues=ingest,wiki`.
 
 **Frontend**:
 

@@ -19,10 +19,8 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
     result_expires=86400,
 
-    # Task time limits — prevents hung workers on large repos or slow API calls
-    task_soft_time_limit=600,       # 10 min — SIGTERM sent, task can clean up
-    task_time_limit=660,            # 11 min — SIGKILL if still running
-    worker_max_tasks_per_child=50,  # Restart worker after 50 tasks (prevents memory leaks)
+    # Per-task time limits below. (Global limits would kill multi-hour ingests.)
+    worker_max_tasks_per_child=50,  # prefork only; ignored for --pool=solo
 
     # Separate queues — wiki generation never blocks ingestion
     task_routes={
@@ -30,8 +28,16 @@ celery_app.conf.update(
         "worker.tasks.generate_wiki_page_task": {"queue": "wiki"},
     },
 
-    # Rate limit ingestion to prevent a single user from saturating workers
+    # Per-task limits: ingest can run for hours (embeddings); wiki pages stay bounded.
     task_annotations={
-        "worker.tasks.ingest_repo": {"rate_limit": "30/m"},
+        "worker.tasks.ingest_repo": {
+            "rate_limit": "30/m",
+            "soft_time_limit": 8 * 3600,
+            "time_limit": 8 * 3600 + 300,
+        },
+        "worker.tasks.generate_wiki_page_task": {
+            "soft_time_limit": 600,
+            "time_limit": 660,
+        },
     },
 )
