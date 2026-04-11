@@ -91,6 +91,18 @@ docker compose exec backend alembic upgrade head
 
 ## Architecture
 
+**End-to-end system** — entry routing, FastAPI, Celery, data stores, and external services.
+
+![System architecture: React, nginx, FastAPI, RabbitMQ, Celery workers, Redis, PostgreSQL pgvector, GitHub, Claude, embeddings, reranker](pics/readme/system.png)
+
+**Frontend** — React pages, Zustand, hooks, client I/O (REST, WebSockets, SSE), and nginx.
+
+![Frontend architecture: presentation, logic, I/O layers from user through nginx](pics/readme/System_frontend.png)
+
+**Backend** — API surface, queues, workers, Redis, PostgreSQL + pgvector, and model/API integrations.
+
+![Backend architecture: FastAPI routes, RabbitMQ queues, Celery tasks, Redis, Postgres, external APIs](pics/readme/System_backend.png)
+
 ```
 Browser  →  nginx (TLS)  →  frontend (Vite static build + nginx)
                 │
