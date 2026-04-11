@@ -2,9 +2,23 @@
 
 A production-grade DeepWiki-style app for research groups: index GitHub repos, browse an AI-generated wiki, and chat over the codebase with retrieval-augmented generation (RAG).
 
+## Screenshots
+
+**Home — index repos and browse indexed libraries**
+
+![Home dashboard: GitHub URL input, index button, and grid of indexed repositories with status and chunk counts](pics/readme/home-dashboard.png)
+
+**Wiki — generated documentation with sidebar navigation**
+
+![Wiki article view with left nav, markdown content, and repo metadata](pics/readme/wiki-page.png)
+
+**Wiki + RAG chat — overview with architecture diagram and “Ask about this repo” panel**
+
+![Wiki overview with Mermaid-style architecture summary and streaming chat sidebar](pics/readme/wiki-overview-chat.png)
+
 ## Stack
 
-- **Frontend**: React + Vite (app in `frontend/`) + Tailwind CSS
+- **Frontend**: React + **Vite** (app in `frontend/`) + Tailwind CSS; production build served by nginx inside the `frontend` container
 - **Edge**: nginx — TLS termination, rate limits, WebSocket proxy to the API
 - **Backend**: FastAPI (Gunicorn + Uvicorn workers)
 - **Jobs**: Celery with **RabbitMQ** as the broker and **Redis** for results, OAuth state, rate limiting, and wiki task deduplication
@@ -21,8 +35,8 @@ A production-grade DeepWiki-style app for research groups: index GitHub repos, b
 
 Go to https://github.com/settings/developers → **New OAuth App**.
 
-- **Homepage URL**: your app origin (e.g. `https://localhost` when using the bundled nginx TLS setup, or `http://localhost:3000` for a minimal local frontend-only URL).
-- **Authorization callback URL**: must match **`GITHUB_CALLBACK_URL`** exactly (see below), e.g. `https://localhost/api/auth/callback`.
+- **Homepage URL**: your app origin (e.g. `https://localhost` when using the bundled nginx TLS setup, or `http://localhost:3000` when running the Vite dev server).
+- **Authorization callback URL**: must match **`GITHUB_CALLBACK_URL`** exactly (see below), e.g. `https://localhost/api/auth/callback` behind nginx, or `http://localhost:3000/api/auth/callback` if the dev server proxies `/api` to the backend (see `frontend/vite.config.ts`).
 
 ### 2. Configure environment
 
@@ -30,18 +44,19 @@ Go to https://github.com/settings/developers → **New OAuth App**.
 cp .env.example .env
 ```
 
-Set at least:
+Edit `.env` and set at least:
 
 | Variable | Purpose |
 |----------|---------|
 | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | GitHub OAuth |
-| `GITHUB_CALLBACK_URL` | OAuth redirect; default pattern `/api/auth/callback` under the API |
+| `GITHUB_CALLBACK_URL` | OAuth redirect; must match the FastAPI route **`/api/auth/callback`** as seen by the browser (include origin, e.g. `https://localhost/api/auth/callback`) |
 | `ANTHROPIC_API_KEY` | Claude API |
 | `SECRET_KEY` | Session signing — `python -c "import secrets; print(secrets.token_hex(32))"` |
 | `FERNET_KEY` | Encrypts stored GitHub tokens — `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
 | `REDIS_PASSWORD` | Redis auth (compose) |
 | `RABBITMQ_PASSWORD` | RabbitMQ auth (**required** for `docker compose`; matches `RABBITMQ_URL` in services) |
-| `FRONTEND_URL`, `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_WS_URL` | Browser → API / WebSocket URLs (use `wss://` behind HTTPS) |
+| `VITE_API_URL`, `VITE_WS_URL` | **Build-time** (Vite): browser-facing API and WebSocket origins for the static frontend (e.g. `https://localhost` and `wss://localhost` behind TLS) |
+| `FRONTEND_URL` | CORS and redirects; defaults to `https://localhost` in compose |
 | `FLOWER_USER`, `FLOWER_PASSWORD` | Celery Flower basic auth |
 
 ### 3. Start services
@@ -59,8 +74,8 @@ Typical layout:
 | `redis` | Celery backend, rate limits, OAuth state, wiki dispatch keys |
 | `backend` | FastAPI on `127.0.0.1:8001` |
 | `celery-worker` | Queues `ingest`, `wiki` (ingestion + wiki page tasks) |
-| `celery-flower` | Task UI on `127.0.0.1:5555` (basic auth) |
-| `frontend` | Next.js on `127.0.0.1:3000` |
+| `celery-flower` | Task UI at `http://127.0.0.1:5555/flower/` (basic auth; `--url_prefix=flower`) |
+| `frontend` | Vite **production** static assets on `127.0.0.1:3000` (nginx in container) |
 | `nginx` | HTTPS on `443` (certs in `nginx/certs/`; HTTP redirects to HTTPS) |
 
 - **HTTPS app (via nginx)**: `https://localhost` — API under `/api/`, WebSocket chat under `/ws/`.
@@ -77,7 +92,7 @@ docker compose exec backend alembic upgrade head
 ## Architecture
 
 ```
-Browser  →  nginx (TLS)  →  frontend (Next.js)
+Browser  →  nginx (TLS)  →  frontend (Vite static build + nginx)
                 │
                 ├→ /api/* , /ws/*  →  backend (FastAPI)
                 │                         │
@@ -107,7 +122,7 @@ Celery workers  ←→  RabbitMQ (broker)  +  Redis (result backend)
 1. **Clone** — shallow clone using the user’s GitHub token.
 2. **Walk** — skip large/binary paths; limits configurable (`max_file_size_bytes`, `max_file_lines`, `max_repo_size_kb`).
 3. **Chunk** — tree-sitter AST boundaries where possible; sliding windows for prose configs.
-4. **Embed** — Jina model, batched (`embed_batch_size` from config, default 64).
+4. **Embed** — Jina model, batched (`embed_batch_size` in `backend/core/config.py`, default **96**).
 5. **Insert** — bulk insert into `chunks` (768-d vectors).
 6. **Index** — HNSW on `chunks.embedding` via migration (`m = 16`, `ef_construction = 64`). A separate HNSW index exists for semantic-cache embeddings.
 7. **Wiki** — Haiku builds a wiki structure and overview; Mermaid diagram on overview when generation succeeds; each page is filled by Celery tasks on the **`wiki`** queue. Additional directory pages can still be requested on demand via the wiki API (tasks deduplicated with Redis).
@@ -133,8 +148,11 @@ export DATABASE_URL=postgresql://...
 export REDIS_URL=redis://:password@localhost:6379
 export RABBITMQ_URL=amqp://user:password@localhost:5672//
 export SECRET_KEY=... FERNET_KEY=... ANTHROPIC_API_KEY=... GITHUB_CLIENT_ID=... GITHUB_CLIENT_SECRET=...
+export GITHUB_CALLBACK_URL=http://localhost:3000/api/auth/callback
 uvicorn api.main:app --reload --port 8001
 ```
+
+Set `GITHUB_CALLBACK_URL` to a URL your browser can reach that forwards `/api` to this backend (e.g. Vite on port 3000 with the bundled proxy).
 
 **Celery worker** — same env (required for indexing and wiki generation; the API only enqueues work):
 
@@ -145,13 +163,15 @@ celery -A worker.celery_app worker --queues=ingest,wiki --concurrency=2 --loglev
 
 If **indexing stays at 0%**, the worker is not running or is not subscribed to the **`ingest`** queue. Confirm RabbitMQ matches `RABBITMQ_URL` in the worker environment and that the command includes `--queues=ingest,wiki`.
 
-**Frontend**:
+**Frontend** — Vite dev server (port **3000**, proxies `/api` and `/ws` to the backend):
 
 ```bash
 cd frontend
 npm install
 npm run dev
 ```
+
+Optional: create `frontend/.env.local` with `VITE_API_URL=` (empty) and `VITE_WS_URL=` (empty) so the app uses same-origin `/api` and `/ws` via the dev proxy.
 
 ## Optional
 
