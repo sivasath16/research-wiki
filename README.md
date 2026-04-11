@@ -1,6 +1,6 @@
-# ResearchWiki
+# CodeAtlas
 
-A production-grade DeepWiki-style app for research groups: index GitHub repos, browse an AI-generated wiki, and chat over the codebase with retrieval-augmented generation (RAG).
+A production-grade tool for developers to understand large codebases: index GitHub repos, browse an AI-generated wiki, and chat over the codebase with retrieval-augmented generation (RAG).
 
 ## Screenshots
 
